@@ -181,12 +181,15 @@ app.post('/generate-card', async (req, res) => {
       .single();
     if (encErr || !encounter) throw encErr || new Error('증상 데이터 조회 실패');
 
-    // Translate encounter data to Korean
-    const englishText = `Chief Complaint: ${encounter.data.chief_complaint}
-Onset: ${encounter.data.symptom_onset}
-Severity: ${encounter.data.symptom_severity}
-Associated Symptoms: ${encounter.data.associated_symptoms?.join(', ') || 'None'}
-Concerns: ${encounter.data.concerns}`;
+    // Log the structure of encounter to verify data access
+    console.log('Encounter data:', encounter);
+
+    // Safely access fields in encounter.data
+    const englishText = `Chief Complaint: ${encounter.data?.chief_complaint || 'N/A'}
+Onset: ${encounter.data?.symptom_onset || 'N/A'}
+Severity: ${encounter.data?.symptom_severity || 'N/A'}
+Associated Symptoms: ${encounter.data?.associated_symptoms?.join(', ') || 'None'}
+Concerns: ${encounter.data?.concerns || 'N/A'}`;
     const koreanText = await translateToKorean(englishText);
 
     // Combine English and Korean text
