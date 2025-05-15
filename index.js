@@ -184,18 +184,17 @@ app.post('/generate-card', async (req, res) => {
     // Log the structure of encounter to verify data access
     console.log('Encounter data:', encounter);
 
-    // Safely access fields in encounter.data
-    const englishText = `Chief Complaint: ${encounter.data?.chief_complaint || 'N/A'}
-Onset: ${encounter.data?.symptom_onset || 'N/A'}
-Severity: ${encounter.data?.symptom_severity || 'N/A'}
-Associated Symptoms: ${encounter.data?.associated_symptoms?.join(', ') || 'None'}
-Concerns: ${encounter.data?.concerns || 'N/A'}`;
+    const e = encounter.data;
+    const englishText = `Chief Complaint: ${e.chief_complaint}
+Onset: ${e.symptom_onset}
+Severity: ${e.symptom_severity}
+Associated Symptoms: ${e.associated_symptoms?.join(', ') || 'None'}
+Concerns: ${e.concerns}`;
+
     const koreanText = await translateToKorean(englishText);
+    const combinedText = `${englishText}\n\n[번역]\n${koreanText}`;
 
-    // Combine English and Korean text
-    const combinedText = `${englishText}\n${koreanText}`;
-
-    // PDF 생성
+    // Pass combinedText to generateMedicalCardPdf
     const pdfBuffer = await generateMedicalCardPdf(profile, combinedText);
 
     // Storage 업로드 & signed URL 생성
@@ -234,4 +233,3 @@ Concerns: ${encounter.data?.concerns || 'N/A'}`;
 // ───────────────────────────────────────── 서버 실행
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
