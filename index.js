@@ -1,3 +1,4 @@
+// ▼▼▼ 모든 의존성 및 기본 설정은 동일합니다 — 변경 부분은 ★ 로 표시
 const express = require('express');
 const cors = require('cors');
 const { OpenAI } = require('openai');
@@ -11,22 +12,18 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// OpenAI 클라이언트 초기화
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-// Supabase 클라이언트 초기화
+// ─────────────────────────────── OpenAI & Supabase 클라이언트
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// system prompt 상수
+// ─────────────────────────────── System‑prompt
 const PROMPT = fs.readFileSync(path.join(__dirname, 'prompts', 'main.md'), 'utf-8');
 
-// Function Calling 스키마
-defineSaveEncounterSchema = {
+// ─────────────────────────────── Function‑calling schema
+const defineSaveEncounterSchema = {
   type: 'function',
   function: {
     name: 'save_encounter',
@@ -51,7 +48,7 @@ defineSaveEncounterSchema = {
   }
 };
 
-// POST /chat 엔드포인트 (Function Calling 기반)
+// ───────────────────────────────────────── /chat 엔드포인트
 app.post('/chat', async (req, res) => {
   try {
     const { user_id, thread_id, user_input } = req.body;
@@ -59,25 +56,24 @@ app.post('/chat', async (req, res) => {
       return res.status(400).json({ error: 'user_id, thread_id, user_input 필수' });
     }
 
-    // 1. 과거 대화 불러오기
-    const { data: history, error: historyError } = await supabase
+    // 1️⃣ 최근 대화 20개
+    const { data: history, error: historyErr } = await supabase
       .from('chat_messages')
       .select('role, content')
       .eq('user_id', user_id)
       .eq('thread_id', thread_id)
       .order('timestamp', { ascending: true })
       .limit(20);
+    if (historyErr) throw historyErr;
 
-    if (historyError) throw historyError;
-
-    // 2. messages 배열 구성
+    // 2️⃣ messages 배열 구성
     const messages = [
       { role: 'system', content: PROMPT },
       ...(history || []),
       { role: 'user', content: user_input }
     ];
 
-    // 3. OpenAI 호출 (Function Calling)
+    // 3️⃣ OpenAI 호출
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages,
@@ -87,47 +83,78 @@ app.post('/chat', async (req, res) => {
 
     const choice = completion.choices[0];
 
-    // 4. tool_calls 처리
+    // 4️⃣ tool‑calls 처리
     if (choice.finish_reason === 'tool_calls' && choice.message.tool_calls) {
       for (const toolCall of choice.message.tool_calls) {
         if (toolCall.function.name === 'save_encounter') {
-          // arguments는 string이므로 파싱 필요
           const args = JSON.parse(toolCall.function.arguments);
-
-          // Supabase encounters 테이블에 저장
-          const { data: insertData, error: insertError } = await supabase
+          const { data: inserted, error } = await supabase
             .from('encounters')
-            .insert({
-              user_id,
-              thread_id,
-              data: args
-            })
+            .insert({ user_id, thread_id, data: args })
             .select('id')
             .single();
+          if (error) throw error;
 
-          if (insertError) throw insertError;
-
+          // tool 결과도 choices 형태로 래핑
           return res.json({
-            message: '증상 정보가 성공적으로 저장되었습니다.',
-            encounter_id: insertData.id,
-            encounter: args
+            encounter_id: inserted.id,
+            encounter: args,
+            choices: [
+              {
+                message: {
+                  role: 'assistant',
+                  content: 'Your symptom information has been saved successfully.'
+                }
+              }
+            ]
           });
         }
       }
     }
 
-    // 5. 일반 답변 반환
+    // 5️⃣ 일반 assistant 답변 반환 (choices 구조 유지)
     return res.json({
-      message: choice.message.content
+      choices: [
+        {
+          message: {
+            role: 'assistant',
+            content: choice.message.content || ''
+          }
+        }
+      ],
+      usage: completion.usage || null
     });
-
-  } catch (error) {
-    console.error('chat error:', error);
-    res.status(500).json({ error: error.message || error });
+  } catch (err) {
+    console.error('chat error:', err);
+    res.status(500).json({ error: err.message || err });
   }
 });
 
-// 진료카드 PDF 생성 및 업로드 엔드포인트
+// Update translation logic using the latest OpenAI Node.js SDK
+async function translateToKorean(text) {
+  try {
+    const response = await openai.chat.completions.create({
+      model: 'gpt-3.5-turbo',
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a helpful medical translator.'
+        },
+        {
+          role: 'user',
+          content: `Translate the following medical information to Korean:\n\n${text}`
+        }
+      ]
+    });
+    const translatedText = response.choices[0].message.content;
+    return translatedText;
+  } catch (error) {
+    console.error('Translation error:', error);
+    return '번역 실패';
+  }
+}
+
+// Modify the /generate-card endpoint to include translation
 app.post('/generate-card', async (req, res) => {
   try {
     const { user_id, encounter_id } = req.body;
@@ -135,68 +162,73 @@ app.post('/generate-card', async (req, res) => {
       return res.status(400).json({ error: 'user_id, encounter_id 필수' });
     }
 
-    // 1. 프로필 조회
-    const { data: profile, error: profileError } = await supabase
+    // 프로필 조회
+    const { data: profile, error: profileErr } = await supabase
       .from('profiles')
-      .select('name, birthdate, gender')
-      .eq('user_id', user_id)
+      .select('birth_date, gender')
+      .eq('id', user_id)
       .single();
-    if (profileError || !profile) throw profileError || new Error('프로필 조회 실패');
+    if (profileErr || !profile) throw profileErr || new Error('프로필 조회 실패');
 
-    // 2. 증상 데이터 조회
-    const { data: encounter, error: encounterError } = await supabase
+    // 이름 필드 제거 또는 대체
+    profile.name = '이름 없음';
+
+    // 증상 데이터 조회
+    const { data: encounter, error: encErr } = await supabase
       .from('encounters')
       .select('data')
       .eq('id', encounter_id)
       .single();
-    if (encounterError || !encounter) throw encounterError || new Error('증상 데이터 조회 실패');
+    if (encErr || !encounter) throw encErr || new Error('증상 데이터 조회 실패');
 
-    // 3. PDF 생성
-    const pdfBuffer = await generateMedicalCardPdf(profile, encounter.data);
+    // Translate encounter data to Korean
+    const englishText = `Chief Complaint: ${encounter.data.chief_complaint}
+Onset: ${encounter.data.symptom_onset}
+Severity: ${encounter.data.symptom_severity}
+Associated Symptoms: ${encounter.data.associated_symptoms?.join(', ') || 'None'}
+Concerns: ${encounter.data.concerns}`;
+    const koreanText = await translateToKorean(englishText);
 
-    // 4. Supabase Storage 업로드
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const filename = `medical-record-${user_id}-${timestamp}.pdf`;
-    const uploadPath = `${user_id}/${filename}`;
-    const { data: uploadData, error: uploadError } = await supabase.storage
+    // Combine English and Korean text
+    const combinedText = `${englishText}\n${koreanText}`;
+
+    // PDF 생성
+    const pdfBuffer = await generateMedicalCardPdf(profile, combinedText);
+
+    // Storage 업로드 & signed URL 생성
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `medical-record-${user_id}-${ts}.pdf`;
+    const pathInBucket = `${user_id}/${filename}`;
+
+    const { error: uploadErr } = await supabase.storage
       .from('medical-records')
-      .upload(uploadPath, pdfBuffer, {
+      .upload(pathInBucket, pdfBuffer, {
         contentType: 'application/pdf',
         upsert: true
       });
-    if (uploadError) throw uploadError;
+    if (uploadErr) throw uploadErr;
 
-    // 5. signed URL 생성 (1시간)
-    const { data: signedUrlData, error: signedUrlError } = await supabase.storage
+    const { data: signed, error: signedErr } = await supabase.storage
       .from('medical-records')
-      .createSignedUrl(uploadPath, 60 * 60);
-    if (signedUrlError || !signedUrlData) throw signedUrlError || new Error('signed URL 생성 실패');
+      .createSignedUrl(pathInBucket, 60 * 60);
+    if (signedErr || !signed) throw signedErr || new Error('signed URL 생성 실패');
 
-    // 6. medical_records 테이블에 insert
-    const { data: recordData, error: recordError } = await supabase
+    // medical_records 테이블 기록
+    const { data: record, error: recErr } = await supabase
       .from('medical_records')
-      .insert({
-        user_id,
-        encounter_id,
-        pdf_url: signedUrlData.signedUrl,
-        status: 'active'
-      })
+      .insert({ user_id, encounter_id, pdf_url: signed.signedUrl, status: 'active' })
       .select('id')
       .single();
-    if (recordError || !recordData) throw recordError || new Error('medical_records 저장 실패');
+    if (recErr || !record) throw recErr || new Error('medical_records 저장 실패');
 
-    // 7. 응답
-    res.json({
-      pdf_url: signedUrlData.signedUrl,
-      record_id: recordData.id
-    });
-  } catch (error) {
-    console.error('generate-card error:', error);
-    res.status(500).json({ error: error.message || error });
+    res.json({ pdf_url: signed.signedUrl, record_id: record.id });
+  } catch (err) {
+    console.error('generate-card error:', err);
+    res.status(500).json({ error: err.message || err });
   }
 });
 
+// ───────────────────────────────────────── 서버 실행
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
