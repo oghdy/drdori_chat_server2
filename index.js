@@ -130,31 +130,8 @@ app.post('/chat', async (req, res) => {
   }
 });
 
-// Update translation logic using the latest OpenAI Node.js SDK
-async function translateToKorean(text) {
-  try {
-    const response = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo',
-      messages: [
-        {
-          role: 'system',
-          content: 'You are a helpful medical translator.'
-        },
-        {
-          role: 'user',
-          content: `Translate the following medical information to Korean:\n\n${text}`
-        }
-      ]
-    });
-    const translatedText = response.choices[0].message.content;
-    return translatedText;
-  } catch (error) {
-    console.error('Translation error:', error);
-    return '번역 실패';
-  }
-}
-
-// Modify the /generate-card endpoint to include translation
+// ★★★ 여기부터 수정됨 ★★★
+// /generate-card 엔드포인트 - PDF 생성 로직 개선
 app.post('/generate-card', async (req, res) => {
   try {
     const { user_id, encounter_id } = req.body;
@@ -162,7 +139,7 @@ app.post('/generate-card', async (req, res) => {
       return res.status(400).json({ error: 'user_id, encounter_id 필수' });
     }
 
-    // 프로필 조회
+    // 1️⃣ 프로필 조회
     const { data: profile, error: profileErr } = await supabase
       .from('profiles')
       .select('birth_date, gender')
@@ -170,10 +147,11 @@ app.post('/generate-card', async (req, res) => {
       .single();
     if (profileErr || !profile) throw profileErr || new Error('프로필 조회 실패');
 
-    // 이름 필드 제거 또는 대체
-    profile.name = '이름 없음';
+    // 이름 설정 (현재 profiles 테이블에 name이 없으므로 기본값)
+    profile.name = '환자';
+    profile.language = 'English (Primary)';
 
-    // 증상 데이터 조회
+    // 2️⃣ 증상 데이터 조회
     const { data: encounter, error: encErr } = await supabase
       .from('encounters')
       .select('data')
@@ -181,25 +159,81 @@ app.post('/generate-card', async (req, res) => {
       .single();
     if (encErr || !encounter) throw encErr || new Error('증상 데이터 조회 실패');
 
-    // Log the structure of encounter to verify data access
     console.log('Encounter data:', encounter);
 
     const e = encounter.data;
-    const englishText = `Chief Complaint: ${e.chief_complaint}
-Onset: ${e.symptom_onset}
-Severity: ${e.symptom_severity}
-Associated Symptoms: ${e.associated_symptoms?.join(', ') || 'None'}
-Concerns: ${e.concerns}`;
 
-    const koreanText = await translateToKorean(englishText);
-    const combinedText = `${englishText}\n\n[번역]\n${koreanText}`;
+    // 3️⃣ OpenAI를 사용하여 구조화된 의료 정보 추출
+    const extractionPrompt = `
+You are a medical documentation assistant. Based on the following patient symptom data, extract and structure the information for a medical card PDF.
 
-    // Pass combinedText to generateMedicalCardPdf
-    const pdfBuffer = await generateMedicalCardPdf(profile, combinedText);
+**Patient Data:**
+- Chief Complaint: ${e.chief_complaint}
+- Onset: ${e.symptom_onset}
+- Severity: ${e.symptom_severity}
+- Associated Symptoms: ${e.associated_symptoms?.join(', ') || 'None'}
+- Concerns: ${e.concerns}
 
-    // Storage 업로드 & signed URL 생성
+**Required Output (JSON format):**
+{
+  "cc_kor": "주호소 한국어 (기간 포함)",
+  "cc_eng": "Chief complaint in English (with duration)",
+  "hpi_kor": "현병력 상세 설명 (한국어로 자연스럽게 서술형으로)",
+  "hpi_eng": "History of Present Illness in English (narrative format)",
+  "pain_score": "숫자만 (1-10) or N/A",
+  "allergies_kor": "알레르기 정보 (없으면 '없음')",
+  "allergies_eng": "Allergy information (if none, 'None')",
+  "suggested_dept_kor": "추천 진료과 (한국어)",
+  "suggested_dept_eng": "Suggested Department (English)",
+  "is_emergency": true or false
+}
+
+**Important:**
+- is_emergency should be true if severity > 7 or red flags present
+- Translate accurately and naturally
+- HPI should be a narrative paragraph, not bullet points
+- Include duration information in Chief Complaint
+`;
+
+    const extractionResponse = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        { 
+          role: 'system', 
+          content: 'You are a medical information extraction assistant. Always respond in valid JSON format.' 
+        },
+        { role: 'user', content: extractionPrompt }
+      ],
+      response_format: { type: 'json_object' }
+    });
+
+    let structuredData;
+    try {
+      structuredData = JSON.parse(extractionResponse.choices[0].message.content);
+      console.log('Structured medical data:', structuredData);
+    } catch (parseErr) {
+      console.error('JSON 파싱 실패:', parseErr);
+      // 기본값 설정 (fallback)
+      structuredData = {
+        cc_kor: `${e.chief_complaint} (${e.symptom_onset})`,
+        cc_eng: `${e.chief_complaint} (${e.symptom_onset})`,
+        hpi_kor: `환자는 ${e.symptom_onset}부터 ${e.chief_complaint} 증상을 호소합니다. 중증도는 ${e.symptom_severity}/10이며, ${e.associated_symptoms?.join(', ') || '특별한 관련 증상은 없습니다'}. 우려사항: ${e.concerns}`,
+        hpi_eng: `Patient reports ${e.chief_complaint} starting ${e.symptom_onset}. Severity: ${e.symptom_severity}/10. Associated symptoms: ${e.associated_symptoms?.join(', ') || 'None'}. Concerns: ${e.concerns}`,
+        pain_score: e.symptom_severity || 'N/A',
+        allergies_kor: '정보 없음',
+        allergies_eng: 'Unknown',
+        suggested_dept_kor: '내과',
+        suggested_dept_eng: 'Internal Medicine',
+        is_emergency: parseInt(e.symptom_severity) > 7
+      };
+    }
+
+    // 4️⃣ PDF 생성 (구조화된 데이터 전달)
+    const pdfBuffer = await generateMedicalCardPdf(profile, structuredData);
+
+    // 5️⃣ Storage 업로드 & signed URL 생성
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
-    const filename = `medical-record-${user_id}-${ts}.pdf`;
+    const filename = `medical-card-${user_id}-${ts}.pdf`;
     const pathInBucket = `${user_id}/${filename}`;
 
     const { error: uploadErr } = await supabase.storage
@@ -215,7 +249,7 @@ Concerns: ${e.concerns}`;
       .createSignedUrl(pathInBucket, 60 * 60);
     if (signedErr || !signed) throw signedErr || new Error('signed URL 생성 실패');
 
-    // medical_records 테이블 기록
+    // 6️⃣ medical_records 테이블 기록
     const { data: record, error: recErr } = await supabase
       .from('medical_records')
       .insert({ user_id, encounter_id, pdf_url: signed.signedUrl, status: 'active' })
@@ -229,6 +263,7 @@ Concerns: ${e.concerns}`;
     res.status(500).json({ error: err.message || err });
   }
 });
+// ★★★ 수정 끝 ★★★
 
 // ───────────────────────────────────────── 서버 실행
 const PORT = process.env.PORT || 3000;
