@@ -246,7 +246,7 @@ You are a medical documentation assistant. Based on the following patient sympto
 
     const { data: signed, error: signedErr } = await supabase.storage
       .from('medical-records')
-      .createSignedUrl(pathInBucket, 60 * 60);
+      .createSignedUrl(pathInBucket, 60 * 60 * 24 * 7);
     if (signedErr || !signed) throw signedErr || new Error('signed URL 생성 실패');
 
     // 6️⃣ medical_records 테이블 기록
